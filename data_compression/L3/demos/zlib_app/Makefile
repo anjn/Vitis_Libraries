@@ -126,6 +126,7 @@ endif
 ############################## Setting up Kernel Variables ##############################
 # Kernel compiler global settings
 VPP_FLAGS += -t $(TARGET) --platform $(XPLATFORM) --save-temps
+#VPP_FLAGS += --kernel_frequency 500
 LDCLFLAGS += --optimize 2 --jobs 8
 VPP_FLAGS +=-I$(XFLIB_DIR)/L1/include/hw
 VPP_FLAGS +=-I$(XFLIB_DIR)/L2/include

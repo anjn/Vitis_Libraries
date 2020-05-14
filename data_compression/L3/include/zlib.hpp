@@ -40,7 +40,7 @@ const int gz_max_literal_count = 4096;
 #define MAX_DDCOMP_UNITS D_COMPUTE_UNIT
 
 // Default block size
-#define BLOCK_SIZE_IN_KB 1024
+#define BLOCK_SIZE_IN_KB (1024 * 1)
 
 // Input and output buffer size
 #define INPUT_BUFFER_SIZE (8 * 1024 * 1024)
@@ -220,7 +220,7 @@ class xfZlib {
      */
     ~xfZlib();
 
-   private:
+   //private:
     void _enqueue_writes(uint32_t bufSize, uint8_t* in, uint32_t inputSize, int cu);
     void _enqueue_reads(uint32_t bufSize, uint8_t* out, uint32_t* decompSize, int cu, uint32_t max_outbuf);
 

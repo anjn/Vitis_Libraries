@@ -330,7 +330,7 @@ $(LIBZLIB): $(OBJ_FILES) $(EXTRA_OBJ_FILES) | check_vpp check_xrt check_platform
 	mkdir -p $(BUILD_DIR)
 	$(CXX) -shared -fPIC -D_LARGEFILE64_SOURCE=1 -DHAVE_HIDDEN -o $@ $^ $(CXXFLAGS) $(LDFLAGS) -lc
 
-$(EXE_FILE): $(OBJ_FILES) | check_vpp check_xrt check_platform
+$(EXE_FILE): $(OBJ_FILES) $(LIBZLIB) | check_vpp check_xrt check_platform
 	@echo -e "----\nCompiling libz.so $(notdir $@)..."
 	mkdir -p $(BUILD_DIR)
 	cp ./build/libz.so .
