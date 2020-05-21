@@ -28,13 +28,41 @@ const uint32_t c_dtree_size = 64;
 const uint32_t block_size = block_size_in_kb * 1024;
 const uint32_t host_buffer_size = block_size * num_engines_per_kernel;
 
-struct compress_worker
+struct compress_context
 {
+  cl::Context context;
   cl::CommandQueue q;
 
   // Kernels
   cl::Kernel lz77_kernel;
   cl::Kernel huffman_kernel;
+
+  cl::Event ev_h2d_0;
+  cl::Event ev_h2d_1;
+  cl::Event ev_lz77;
+  cl::Event ev_huffman;
+
+  compress_context(
+    const cl::Context& context_, const cl::Device& device, cl::Kernel& lz77_kernel_, cl::Kernel& huffman_kernel_
+  ) {
+    context = context_;
+    q = cl::CommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
+    lz77_kernel = lz77_kernel_;
+    huffman_kernel = huffman_kernel_;
+  }
+
+  void finish() {
+    q.finish();
+  }
+};
+
+struct compress_worker
+{
+  //cl::CommandQueue q;
+
+  // Kernels
+  //cl::Kernel lz77_kernel;
+  //cl::Kernel huffman_kernel;
 
   // Device buffers
   cl::Buffer device_input;
@@ -48,6 +76,8 @@ struct compress_worker
   // Hos buffers
   template<typename T>
   using host_buffer = std::vector<T, zlib_aligned_allocator<T>>;
+  template<typename T>
+  size_t bytes(const host_buffer<T>& b) { return sizeof(uint32_t) * b.size(); }
 
   host_buffer<uint8_t>  host_input;
   host_buffer<uint8_t>  host_lz77_output;
@@ -55,34 +85,33 @@ struct compress_worker
   host_buffer<uint32_t> host_inblk_size;
   host_buffer<uint8_t>  host_output;
 
-  cl::Event ev_d2h;
+  cl::Event ev_read_size;
+  cl::Event ev_read_data;
 
   // Status
   bool executing { false };
 
-  void init(const cl::Context& context, const cl::Device& device, cl::Kernel& lz77_kernel_, cl::Kernel& huffman_kernel_)
-  {
-    q = cl::CommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
-    lz77_kernel = lz77_kernel_;
-    huffman_kernel = huffman_kernel_;
+  compress_worker() {}
 
+  void init(compress_context& c)
+  {
     // Allocate host buffers
     host_input.        resize(host_buffer_size);
-    host_compress_size.resize(sizeof(uint32_t) * num_engines_per_kernel);
-    host_inblk_size.   resize(sizeof(uint32_t) * num_engines_per_kernel);
+    host_compress_size.resize(num_engines_per_kernel);
+    host_inblk_size.   resize(num_engines_per_kernel);
     host_output.       resize(host_buffer_size * 2);
 
     // Create device buffers
-    device_input          = cl::Buffer(context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size, host_input.data());
-    device_lz77_output    = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, host_buffer_size * 4);
-    device_compress_size  = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_compress_size.data());
-    device_inblk_size     = cl::Buffer(context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_inblk_size.data());
-    device_dyn_ltree_freq = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, sizeof(uint32_t) * c_ltree_size * num_engines_per_kernel);
-    device_dyn_dtree_freq = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, sizeof(uint32_t) * c_dtree_size * num_engines_per_kernel);
-    device_output         = cl::Buffer(context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size * 2, host_output.data());
+    device_input          = cl::Buffer(c.context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size, host_input.data());
+    device_lz77_output    = cl::Buffer(c.context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, host_buffer_size * 4);
+    device_compress_size  = cl::Buffer(c.context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_compress_size.data());
+    device_inblk_size     = cl::Buffer(c.context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_inblk_size.data());
+    device_dyn_ltree_freq = cl::Buffer(c.context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, sizeof(uint32_t) * c_ltree_size * num_engines_per_kernel);
+    device_dyn_dtree_freq = cl::Buffer(c.context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, sizeof(uint32_t) * c_dtree_size * num_engines_per_kernel);
+    device_output         = cl::Buffer(c.context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size * 2, host_output.data());
   }
 
-  uint8_t* write_execute(uint8_t* in, uint8_t* in_end)
+  uint8_t* write_execute(compress_context& c, uint8_t* in, uint8_t* in_end)
   {
     uint32_t size = in_end - in;
     if (size > host_buffer_size) size = host_buffer_size;
@@ -101,55 +130,65 @@ struct compress_worker
 
     //
     int narg = 0;
-    lz77_kernel.setArg(narg++, device_input);
-    lz77_kernel.setArg(narg++, device_lz77_output);
-    lz77_kernel.setArg(narg++, device_compress_size);
-    lz77_kernel.setArg(narg++, device_inblk_size);
-    lz77_kernel.setArg(narg++, device_dyn_ltree_freq);
-    lz77_kernel.setArg(narg++, device_dyn_dtree_freq);
-    lz77_kernel.setArg(narg++, block_size_in_kb);
-    lz77_kernel.setArg(narg++, size);
+    c.lz77_kernel.setArg(narg++, device_input);
+    c.lz77_kernel.setArg(narg++, device_lz77_output);
+    c.lz77_kernel.setArg(narg++, device_compress_size);
+    c.lz77_kernel.setArg(narg++, device_inblk_size);
+    c.lz77_kernel.setArg(narg++, device_dyn_ltree_freq);
+    c.lz77_kernel.setArg(narg++, device_dyn_dtree_freq);
+    c.lz77_kernel.setArg(narg++, block_size_in_kb);
+    c.lz77_kernel.setArg(narg++, size);
 
     //
     narg = 0;
-    huffman_kernel.setArg(narg++, device_lz77_output);
-    huffman_kernel.setArg(narg++, device_dyn_ltree_freq);
-    huffman_kernel.setArg(narg++, device_dyn_dtree_freq);
-    huffman_kernel.setArg(narg++, device_output);
-    huffman_kernel.setArg(narg++, device_compress_size);
-    huffman_kernel.setArg(narg++, device_inblk_size);
-    huffman_kernel.setArg(narg++, block_size_in_kb);
-    huffman_kernel.setArg(narg++, size);
+    c.huffman_kernel.setArg(narg++, device_lz77_output);
+    c.huffman_kernel.setArg(narg++, device_dyn_ltree_freq);
+    c.huffman_kernel.setArg(narg++, device_dyn_dtree_freq);
+    c.huffman_kernel.setArg(narg++, device_output);
+    c.huffman_kernel.setArg(narg++, device_compress_size);
+    c.huffman_kernel.setArg(narg++, device_inblk_size);
+    c.huffman_kernel.setArg(narg++, block_size_in_kb);
+    c.huffman_kernel.setArg(narg++, size);
 
     // Host to device
-    std::vector<cl::Event> ev_h2d(1);
-    q.enqueueMigrateMemObjects({device_input, device_inblk_size}, 0 /* 0 means from host*/, nullptr, &ev_h2d[0]);
-
-    //q.enqueueWriteBuffer(device_input, CL_FALSE, 0, size, in);
-    //q.enqueueMigrateMemObjects({device_inblk_size}, 0 /* 0 means from host*/);
+    std::vector<cl::Event> wait_h2d;
+    //if (c.ev_h2d_0() != NULL) wait_h2d.push_back(c.ev_h2d_0);
+    //if (c.ev_h2d_1() != NULL) wait_h2d.push_back(c.ev_h2d_1);
+    //c.q.enqueueMigrateMemObjects({device_input, device_inblk_size}, 0 /* 0 means from host*/, &wait_h2d, &c.ev_h2d);
+    c.q.enqueueWriteBuffer(device_input, CL_FALSE, 0, size, in, &wait_h2d, &c.ev_h2d_0);
+    c.q.enqueueWriteBuffer(device_inblk_size, CL_FALSE, 0, bytes(host_inblk_size), host_inblk_size.data(), &wait_h2d, &c.ev_h2d_1);
 
     // Invoke LZ77 kernel
-    std::vector<cl::Event> ev_lz77(1);
-    q.enqueueTask(lz77_kernel, &ev_h2d, &ev_lz77[0]);
+    std::vector<cl::Event> wait_lz77;
+    wait_lz77.push_back(c.ev_h2d_0);
+    wait_lz77.push_back(c.ev_h2d_1);
+    if (c.ev_lz77() != NULL) wait_lz77.push_back(c.ev_lz77);
+    c.q.enqueueTask(c.lz77_kernel, &wait_lz77, &c.ev_lz77);
 
     // Invoke Huffman kernel
-    std::vector<cl::Event> ev_huffman(1);
-    q.enqueueTask(huffman_kernel, &ev_lz77, &ev_huffman[0]);
+    std::vector<cl::Event> wait_huffman;
+    wait_huffman.push_back(c.ev_lz77);
+    if (ev_read_data() != nullptr) wait_huffman.push_back(ev_read_data);
+    if (c.ev_huffman() != nullptr) wait_huffman.push_back(c.ev_huffman);
+    c.q.enqueueTask(c.huffman_kernel, &wait_huffman, &c.ev_huffman);
 
     // Device to host
-    q.enqueueMigrateMemObjects({device_compress_size}, CL_MIGRATE_MEM_OBJECT_HOST, &ev_huffman, &ev_d2h);
+    std::vector<cl::Event> wait_d2h;
+    wait_d2h.push_back(c.ev_huffman);
+    //c.q.enqueueMigrateMemObjects({device_compress_size}, CL_MIGRATE_MEM_OBJECT_HOST, &ev_huffman, &ev_read_size);
+    c.q.enqueueReadBuffer(device_compress_size, CL_FALSE, 0, bytes(host_compress_size), host_compress_size.data(), &wait_d2h, &ev_read_size);
 
     executing = true;
 
     return in + size;
   }
 
-  uint8_t* read(uint8_t* out)
+  uint8_t* read(compress_context& c, uint8_t* out)
   {
     if (!executing) return out;
 
     //q.finish();
-    ev_d2h.wait();
+    ev_read_size.wait();
     executing = false;
 
     // Device to host
@@ -157,22 +196,20 @@ struct compress_worker
     {
       if (host_inblk_size[i] == 0) break;
 
-      q.enqueueReadBuffer(
+      c.q.enqueueReadBuffer(
         device_output,
         CL_FALSE,              // non-blocking
         block_size * i,        // offset
         host_compress_size[i], // size
-        out                    // ptr
+        out,                   // ptr
+        nullptr,
+        &ev_read_data
       );
 
       out += host_compress_size[i];
     }
 
     return out;
-  }
-
-  void finish() {
-    q.finish();
   }
 };
 
@@ -181,34 +218,32 @@ uint32_t compress2(xfZlib& zlib, uint8_t* in, uint8_t* out, uint32_t input_size)
   const auto out_begin = out;
   const auto in_end = in + input_size;
 
-  const int num_workers = 4;
+  const int num_workers = 12;
   int worker_index = 0;
+
+  compress_context context(*zlib.m_context, zlib.m_device, *zlib.compress_kernel[0], *zlib.huffman_kernel[0]);
 
   compress_worker worker[num_workers];
   for (int i=0; i<num_workers; i++) {
-    worker[i].init(*zlib.m_context, zlib.m_device, *zlib.compress_kernel[0], *zlib.huffman_kernel[0]);
+    worker[i].init(context);
   }
-
-  auto q = cl::CommandQueue(*zlib.m_context, zlib.m_device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
-  for (int i=0; i<num_workers; i++) worker[i].q = q;
 
   auto curr_worker = [&]() -> compress_worker& { return worker[worker_index]; };
   auto next_worker = [&]() -> compress_worker& { return worker[(worker_index + 1) % num_workers]; };
   auto incr_worker = [&]() { worker_index = (worker_index + 1) % num_workers; };
 
   while (in != in_end) {
-    in  = curr_worker().write_execute(in, in_end);
-    out = next_worker().read(out);
+    in  = curr_worker().write_execute(context, in, in_end);
+    out = next_worker().read(context, out);
     incr_worker();
   }
 
   for (int i=0; i<num_workers; i++) {
-    out = next_worker().read(out);
-    //next_worker().finish();
+    out = next_worker().read(context, out);
     incr_worker();
   }
 
-  q.finish();
+  context.finish();
 
   // zlib special block based on Z_SYNC_FLUSH
   *(out++) = 0x01;
