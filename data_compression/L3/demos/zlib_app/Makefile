@@ -127,7 +127,7 @@ endif
 # Kernel compiler global settings
 VPP_FLAGS += -t $(TARGET) --platform $(XPLATFORM) --save-temps
 #VPP_FLAGS += --kernel_frequency 500
-LDCLFLAGS += --optimize 2 --jobs 8
+LDCLFLAGS += --optimize 3 --jobs 8
 VPP_FLAGS +=-I$(XFLIB_DIR)/L1/include/hw
 VPP_FLAGS +=-I$(XFLIB_DIR)/L2/include
 VPP_FLAGS +=-I$(XFLIB_DIR)/L2/src
@@ -143,9 +143,9 @@ LDCLFLAGS_compress_decompress += --config $(CUR_DIR)/opts.ini
 BINARY_CONTAINERS += $(BUILD_DIR)/compress_decompress.xclbin
 BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilLz77Compress.xo
 BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilHuffmanKernel.xo
-BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilZlibDmReader.xo
-BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilZlibDmWriter.xo
-BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilDecompressStream.xo
+#BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilZlibDmReader.xo
+#BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilZlibDmWriter.xo
+#BINARY_CONTAINER_compress_decompress_OBJS += $(TEMP_DIR)/xilDecompressStream.xo
 
 ############################## Setting Targets ##############################
 CP = cp -rf
