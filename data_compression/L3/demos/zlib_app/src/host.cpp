@@ -53,7 +53,7 @@ struct compress_context
     q = cl::CommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
     std::string kernel_name = "xilLz77Compress:{xilLz77Compress_"s + std::to_string(cu_index + 1) + "}";
     lz77_kernel = cl::Kernel(program, kernel_name.c_str());
-    kernel_name = "xilHuffmanKernel:{xilHuffmanKernel"s + std::to_string(cu_index + 1) + "}";
+    kernel_name = "xilHuffmanKernel:{xilHuffmanKernel_"s + std::to_string(cu_index + 1) + "}";
     huffman_kernel = cl::Kernel(program, kernel_name.c_str());
   }
 
@@ -61,6 +61,9 @@ struct compress_context
     q.finish();
   }
 };
+
+cl::Event ev_tmp0;
+cl::Event ev_tmp1;
 
 struct compress_worker
 {
@@ -92,6 +95,8 @@ struct compress_worker
   host_buffer<uint32_t> host_inblk_size;
   host_buffer<uint8_t>  host_output;
 
+  uint8_t* host_input_ptr { nullptr };
+
   cl::Event ev_read_size;
   cl::Event ev_read_data;
 
@@ -112,6 +117,8 @@ struct compress_worker
 
     // Create device buffers
     device_input          = cl::Buffer(c->context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size, host_input.data());
+    //device_input          = cl::Buffer(c->context, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, host_buffer_size);
+    //device_input          = cl::Buffer(c->context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size, host_input.data());
     device_lz77_output    = cl::Buffer(c->context, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, host_buffer_size * 4);
     device_compress_size  = cl::Buffer(c->context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_compress_size.data());
     device_inblk_size     = cl::Buffer(c->context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, sizeof(uint32_t) * num_engines_per_kernel, host_inblk_size.data());
@@ -120,22 +127,29 @@ struct compress_worker
     device_output         = cl::Buffer(c->context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, host_buffer_size * 2, host_output.data());
   }
 
+  void finish() {
+    if (host_input_ptr != nullptr) c->q.enqueueUnmapMemObject(device_input, host_input_ptr);
+  }
+
   uint8_t* write_execute(uint8_t* in, uint8_t* in_end)
   {
-    uint64_t size = in_end - in;
+    uint32_t size = in_end - in;
+    if (size == 0) return in;
     if (size > host_buffer_size) size = host_buffer_size;
 
     // Input block size for each engine
     {
-      uint64_t tmp_size = size;
+      uint32_t tmp_size = size;
       for (uint32_t i=0; i<num_engines_per_kernel; i++) {
-        host_inblk_size[i] = std::min((uint64_t)block_size, tmp_size);
+        host_inblk_size[i] = std::min(block_size, tmp_size);
         tmp_size -= host_inblk_size[i];
       }
     }
 
     // Copy data to host buffer
-    std::memcpy(host_input.data(), in, size);
+    //std::memcpy(host_input.data(), in, size);
+    
+    //device_input          = cl::Buffer(c->context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, size, in);
 
     //
     int narg = 0;
@@ -159,6 +173,9 @@ struct compress_worker
     c->huffman_kernel.setArg(narg++, block_size_in_kb);
     c->huffman_kernel.setArg(narg++, size);
 
+    //if (host_input_ptr == nullptr) host_input_ptr = (uint8_t*) c->q.enqueueMapBuffer(device_input, CL_TRUE, CL_MAP_WRITE, 0, host_buffer_size);
+    //std::memcpy(host_input_ptr, in, size);
+
     // Host to device
     std::vector<cl::Event> wait_h2d;
     //if (c.ev_h2d_0() != NULL) wait_h2d.push_back(c.ev_h2d_0);
@@ -167,10 +184,17 @@ struct compress_worker
     c->q.enqueueWriteBuffer(device_input, CL_FALSE, 0, size, in, &wait_h2d, &c->ev_h2d_0);
     c->q.enqueueWriteBuffer(device_inblk_size, CL_FALSE, 0, bytes(host_inblk_size), host_inblk_size.data(), &wait_h2d, &c->ev_h2d_1);
 
+    //if (ev_tmp0() != NULL) wait_h2d.push_back(ev_tmp0);
+    //if (ev_tmp1() != NULL) wait_h2d.push_back(ev_tmp1);
+    //c->q.enqueueWriteBuffer(device_input, CL_FALSE, 0, size, in, &wait_h2d, &ev_tmp0);
+    //c->q.enqueueWriteBuffer(device_inblk_size, CL_FALSE, 0, bytes(host_inblk_size), host_inblk_size.data(), &wait_h2d, &ev_tmp1);
+
     // Invoke LZ77 kernel
     std::vector<cl::Event> wait_lz77;
     wait_lz77.push_back(c->ev_h2d_0);
     wait_lz77.push_back(c->ev_h2d_1);
+    //wait_lz77.push_back(ev_tmp0);
+    //wait_lz77.push_back(ev_tmp1);
     if (c->ev_lz77() != NULL) wait_lz77.push_back(c->ev_lz77);
     c->q.enqueueTask(c->lz77_kernel, &wait_lz77, &c->ev_lz77);
 
@@ -222,42 +246,40 @@ struct compress_worker
   }
 };
 
+const int num_contexts = 4;
+const int num_workers = num_contexts * 8;
+
+std::vector<std::shared_ptr<compress_context>> context;
+std::vector<std::shared_ptr<compress_worker>> worker;
+
 uint32_t compress2(xfZlib& zlib, uint8_t* in, uint8_t* out, uint32_t input_size)
 {
   const auto out_begin = out;
   const auto in_end = in + input_size;
-
-  const int num_contexts = 1;
-  const int num_workers = num_contexts * 8;
-  int worker_index = 0;
 
   //compress_context context(*zlib.m_context, zlib.m_device, *zlib.compress_kernel[0], *zlib.huffman_kernel[0]);
   //compress_context context[num_contexts];
   //for (int i=0; i<num_contexts; i++) {
   //  context[i].init(*zlib.m_program, *zlib.m_context, zlib.m_device, i);
   //}
-  std::vector<std::shared_ptr<compress_context>> context;
-  for (int i=0; i<num_contexts; i++) {
-    context.push_back(std::make_shared<compress_context>(*zlib.m_program, *zlib.m_context, zlib.m_device, i));
-  }
-
-  compress_worker worker[num_workers];
-  for (int i=0; i<num_workers; i++) {
-    worker[i].init(context[i%num_contexts]);
-  }
-
-  auto curr_worker = [&]() -> compress_worker& { return worker[worker_index]; };
-  auto next_worker = [&]() -> compress_worker& { return worker[(worker_index + 1) % num_workers]; };
+  int worker_index = 0;
+  auto curr_worker = [&]() -> compress_worker& { return *worker[worker_index]; };
+  auto next_worker = [&](int i = 0) -> compress_worker& { return *worker[(worker_index + i) % num_workers]; };
   auto incr_worker = [&]() { worker_index = (worker_index + 1) % num_workers; };
 
   while (in != in_end) {
-    in  = curr_worker().write_execute(in, in_end);
-    out = next_worker().read(out);
-    incr_worker();
+    for (int i=0; i<num_contexts; i++) {
+      in  = next_worker(i).write_execute(in, in_end);
+    }
+    for (int i=0; i<num_contexts; i++) {
+      out = next_worker(num_contexts).read(out);
+      incr_worker();
+    }
   }
 
   for (int i=0; i<num_workers; i++) {
     out = next_worker().read(out);
+    next_worker().finish();
     incr_worker();
   }
 
@@ -273,6 +295,29 @@ uint32_t compress2(xfZlib& zlib, uint8_t* in, uint8_t* out, uint32_t input_size)
   *(out++) = 0xff;
 
   return out - out_begin;
+}
+
+void compress2_init(xfZlib& zlib)
+{
+  for (int i=0; i<num_contexts; i++) {
+    context.push_back(std::make_shared<compress_context>(*zlib.m_program, *zlib.m_context, zlib.m_device, i));
+  }
+  for (int i=0; i<num_workers; i++) {
+    worker.push_back(std::make_shared<compress_worker>());
+    worker[i]->init(context[i%num_contexts]);
+  }
+
+  // warm-up
+  //uint32_t input_size = 8*1024*1024 * num_contexts;
+  //std::vector<uint8_t, zlib_aligned_allocator<uint8_t> > zlib_in(input_size);
+  //std::vector<uint8_t, zlib_aligned_allocator<uint8_t> > zlib_out(input_size * 2);
+  //compress2(zlib, zlib_in.data(), zlib_out.data(), input_size);
+}
+
+void compress2_free()
+{
+  worker.clear();
+  context.clear();
 }
 
 void zlib_headers(std::string& inFile_name, std::ofstream& outFile, uint8_t* zip_out, uint32_t enbytes);
@@ -291,6 +336,11 @@ uint32_t compress_file2(xfZlib& zlib, std::string& inFile_name, std::string& out
 
     inFile.read((char*)zlib_in.data(), input_size);
 
+    compress2_init(zlib);
+    // warm-up
+    compress2(zlib, zlib_in.data(), zlib_out.data(), input_size);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
     auto compress_API_start = std::chrono::high_resolution_clock::now();
     uint32_t enbytes = 0;
 
@@ -303,6 +353,9 @@ uint32_t compress_file2(xfZlib& zlib, std::string& inFile_name, std::string& out
 
     float throughput_in_mbps_1 = (float)input_size * 1000 / duration.count();
     std::cout << std::fixed << std::setprecision(3) << throughput_in_mbps_1;
+
+    std::cout << std::flush;
+    compress2_free();
 
     if (enbytes > 0) {
 #ifdef GZIP_MODE
