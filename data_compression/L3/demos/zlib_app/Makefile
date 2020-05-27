@@ -96,6 +96,7 @@ HOST_SRCS += $(XFLIB_DIR)/common/libs/cmdparser/cmdlineparser.cpp
 HOST_SRCS += $(XFLIB_DIR)/common/libs/logger/logger.cpp
 HOST_SRCS += $(XFLIB_DIR)/common/thirdParty/xxhash/xxhash.c
 
+HOST_HDRS += ./src/zlib2.hpp
 
 CXXFLAGS += -DPARALLEL_BLOCK=8
 CXXFLAGS += -I$(XFLIB_DIR)/L3/include
@@ -189,9 +190,9 @@ $(BUILD_DIR)/compress_decompress.xclbin: $(BINARY_CONTAINER_compress_decompress_
 	$(VPP) $(VPP_FLAGS) --temp_dir $(BUILD_DIR) --report_dir $(BUILD_REPORT_DIR)/compress_decompress -l $(LDCLFLAGS) $(LDCLFLAGS_compress_decompress) -o'$@' $(+)
 
 ############################## Setting Rules for Host (Building Host Executable) ##############################
-$(EXE_FILE): $(HOST_SRCS) | check_xrt
+$(EXE_FILE): $(HOST_SRCS) $(HOST_HDRS) | check_xrt
 	mkdir -p $(BUILD_DIR)
-	$(CXX) -o $@ $^ $(CXXFLAGS) $(LDFLAGS)
+	$(CXX) -o $@ $(HOST_SRCS) $(CXXFLAGS) $(LDFLAGS)
 
 emconfig:$(EMCONFIG_DIR)/emconfig.json
 $(EMCONFIG_DIR)/emconfig.json:
