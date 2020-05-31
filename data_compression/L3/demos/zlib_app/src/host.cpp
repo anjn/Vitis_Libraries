@@ -323,6 +323,8 @@ void compress2_free()
 
 void zlib_headers(std::string& inFile_name, std::ofstream& outFile, uint8_t* zip_out, uint32_t enbytes);
 
+//zlib2::deflate def;
+
 uint32_t compress_file2(xfZlib& zlib, std::string& inFile_name, std::string& outFile_name, uint64_t input_size) {
     std::ifstream inFile(inFile_name.c_str(), std::ifstream::binary);
     std::ofstream outFile(outFile_name.c_str(), std::ofstream::binary);
@@ -337,25 +339,20 @@ uint32_t compress_file2(xfZlib& zlib, std::string& inFile_name, std::string& out
 
     inFile.read((char*)zlib_in.data(), input_size);
 
-//    compress2_init(zlib);
+    compress2_init(zlib);
 //    // warm-up
 //    compress2(zlib, zlib_in.data(), zlib_out.data(), input_size);
 //    std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    zlib2::deflate def;
-    def.program = *zlib.m_program;
-    def.device = zlib.m_device;
-    def.context = *zlib.m_context;
-    def.init_workers();
-    def.compress(zlib_in.data(), zlib_out.data(), input_size/10);
+    //def.compress(zlib_in.data(), zlib_out.data(), input_size/10);
 
     auto compress_API_start = std::chrono::high_resolution_clock::now();
     uint32_t enbytes = 0;
 
     // zlib Compress
     //enbytes = zlib.compress(zlib_in.data(), zlib_out.data(), input_size, HOST_BUFFER_SIZE);
-//    enbytes = compress2(zlib, zlib_in.data(), zlib_out.data(), input_size);
-    enbytes = def.compress(zlib_in.data(), zlib_out.data(), input_size);
+    enbytes = compress2(zlib, zlib_in.data(), zlib_out.data(), input_size);
+//    enbytes = def.compress(zlib_in.data(), zlib_out.data(), input_size);
 
     auto compress_API_end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration<double, std::nano>(compress_API_end - compress_API_start);
@@ -364,7 +361,7 @@ uint32_t compress_file2(xfZlib& zlib, std::string& inFile_name, std::string& out
     std::cout << std::fixed << std::setprecision(3) << throughput_in_mbps_1;
 
     std::cout << std::flush;
-//    compress2_free();
+    compress2_free();
 
     if (enbytes > 0) {
 #ifdef GZIP_MODE
@@ -702,6 +699,8 @@ int main(int argc, char* argv[]) {
     std::string compress_decompress_mod = parser.value("compress_decompress");
     std::string cu = parser.value("cu");
     std::string mcr = parser.value("max_cr");
+
+    def.init(single_bin);
 
     uint8_t max_cr_val = 0;
     if (!(mcr.empty())) {

@@ -8,6 +8,8 @@
 #include <mutex>
 #include <condition_variable>
 
+#include "xcl2.hpp"
+
 namespace zlib2 {
 
 constexpr uint32_t num_engines_per_kernel = 8;
@@ -70,9 +72,9 @@ struct deflate_worker
   host_buffer<uint32_t> host_inblk_size;
 
   deflate_worker(
-    const cl::Program& program,
-    const cl::Context& context,
     const cl::Device& device,
+    const cl::Context& context,
+    const cl::Program& program,
     deflate_cu& cu_
   ):
     cu(cu_)
@@ -232,9 +234,9 @@ struct mt_queue
 struct deflate
 {
   // OpenCL
-  cl::Program program;
-  cl::Device device;
-  cl::Context context;
+  std::vector<cl::Device> devices;
+  std::vector<cl::Context> contexts;
+  std::vector<cl::Program> programs;
 
   // CUs, Workers
   std::vector<deflate_cu> cus;
@@ -251,30 +253,54 @@ struct deflate
   // Thread
   std::thread enqueue_compress_thread;
 
-  deflate():
-    job_id(0),
-    enqueue_compress_thread(&deflate::enqueue_compress, this)
-  {}
+  deflate(): job_id(0) {}
 
   ~deflate()
   {
     workers.stop();
     jobs.stop();
-    enqueue_compress_thread.join();
+
+    if (enqueue_compress_thread.joinable())
+      enqueue_compress_thread.join();
   }
 
-  void init_workers()
+  void init(const std::string& xclbin_file)
   {
-    const int num_cus = 1;
+    // Init OpenCL
+    devices = xcl::get_xil_devices();
+    devices.resize(1);
+
+    auto xclbin = xcl::read_binary_file(xclbin_file);
+    cl::Program::Binaries bins{{xclbin.data(), xclbin.size()}};
+
+    for (auto& device: devices) {
+      auto context = cl::Context(device);
+      auto program = cl::Program(context, {device}, bins);
+      contexts.push_back(context);
+      programs.push_back(program);
+    }
+
+    // Init workers
     const int num_workers_per_cu = 6;
-    const int num_workers = num_cus * num_workers_per_cu;
+    const int num_cus_per_device = 1;
+    const int num_workers_per_device = num_cus_per_device * num_workers_per_cu;
+    const int num_cus = num_cus_per_device * devices.size();
+    const int num_workers = num_workers_per_device * devices.size();
 
     cus.resize(num_cus);
-    for (int i=0; i<num_cus; i++) cus[i].index = i;
+    for (int i=0; i<num_cus; i++) cus[i].index = i % num_cus_per_device;
 
     for (int i=0; i<num_workers; i++) {
-      workers.push(std::make_shared<deflate_worker>(program, context, device, cus[i%num_cus]));
+      int device_index = (i/num_cus_per_device)%devices.size();
+      auto device = devices[device_index];
+      auto context = contexts[device_index];
+      auto program = programs[device_index];
+      auto cu = cus[i%num_cus];
+      workers.push(std::make_shared<deflate_worker>(device, context, program, cu));
     }
+
+    // Start thread
+    enqueue_compress_thread = std::thread(&deflate::enqueue_compress, this);
   }
 
   void push_enqueued(const std::shared_ptr<deflate_job>& job)
@@ -361,7 +387,7 @@ struct deflate
     }
 
     // Get results
-    auto read_q = cl::CommandQueue(context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
+    auto read_q = cl::CommandQueue(contexts[0], devices[0], CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
     const auto out_begin = out;
     for (auto& job: jobs) {
       out = copy_compressed_data(read_q, job, out);
